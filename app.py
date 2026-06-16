@@ -1,17 +1,17 @@
+# app.py
 from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, f1_score, precision_score, recall_score
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import precision_score, recall_score
+
+# Import refactored model configuration functions
+from model import train_configured_model, FEATURE_COLUMNS, TARGET_COLUMN
 
 DATA_PATH = Path(__file__).parent / "creditcard_2023.csv"
 MODEL_PATH = Path(__file__).parent / "fraud_model.pkl"
 ARTIFACTS_PATH = Path(__file__).parent / "fraud_artifacts.pkl"
-FEATURE_COLUMNS = [f"V{i}" for i in range(1, 29)] + ["Amount"]
-TARGET_COLUMN = "Class"
 
 
 def load_data() -> pd.DataFrame:
@@ -20,31 +20,26 @@ def load_data() -> pd.DataFrame:
         st.stop()
     return pd.read_csv(DATA_PATH)
 
+
 def save_artifacts(model, artifacts, cleaned_df):
     joblib.dump(model, MODEL_PATH)
-
     cached = {
         "metrics": artifacts["metrics"],
         "y_test": artifacts["y_test"],
         "fraud_proba": artifacts["fraud_proba"],
-
-        # small sample only
         "sample_df": cleaned_df[FEATURE_COLUMNS + [TARGET_COLUMN]].sample(
             min(1000, len(cleaned_df)),
             random_state=42
         ),
     }
-
     joblib.dump(cached, ARTIFACTS_PATH)
 
 
 def load_artifacts():
     if not MODEL_PATH.exists() or not ARTIFACTS_PATH.exists():
         return None
-
     model = joblib.load(MODEL_PATH)
     cached = joblib.load(ARTIFACTS_PATH)
-
     return {
         "model": model,
         "metrics": cached["metrics"],
@@ -52,6 +47,7 @@ def load_artifacts():
         "fraud_proba": cached["fraud_proba"],
         "cleaned_df": cached["sample_df"],
     }
+
 
 def assess_data_quality(df: pd.DataFrame) -> dict:
     return {
@@ -103,40 +99,10 @@ def clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     return cleaned.reset_index(drop=True), steps
 
 
-@st.cache_resource(show_spinner="Training Random Forest model...")
-def train_model(df: pd.DataFrame) -> dict:
-    X = df[FEATURE_COLUMNS]
-    y = df[TARGET_COLUMN]
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, random_state=42, stratify=y
-    )
-
-    model = RandomForestClassifier(
-        n_estimators=100,
-        max_depth=8,
-        class_weight="balanced",
-        random_state=42,
-        n_jobs=-1,
-    )
-    model.fit(X_train, y_train)
-
-    y_pred = model.predict(X_test)
-    fraud_proba = model.predict_proba(X_test)[:, 1]
-    metrics = {
-        "f1_fraud": float(f1_score(y_test, y_pred, pos_label=1)),
-        "report": classification_report(y_test, y_pred, target_names=["Legit", "Fraud"]),
-        "train_rows": len(X_train),
-        "test_rows": len(X_test),
-        "fraud_rate": float(y.mean()),
-    }
-
-    return {
-        "model": model,
-        "metrics": metrics,
-        "y_test": y_test.to_numpy(),
-        "fraud_proba": fraud_proba,
-    }
+# Adding balancing_method context into the cache signature
+# @st.cache_resource(show_spinner="Training Random Forest model...")
+def get_or_train_model(df: pd.DataFrame, balancing_method: str) -> dict:
+    return train_configured_model(df, balancing_method)
 
 
 def threshold_metrics(y_true: np.ndarray, fraud_proba: np.ndarray, threshold: float) -> dict[str, float]:
@@ -194,7 +160,7 @@ def render_prediction_form(reference_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame([row], columns=FEATURE_COLUMNS)
 
 
-def render_detector(cleaned_df: pd.DataFrame, model: RandomForestClassifier) -> None:
+def render_detector(cleaned_df: pd.DataFrame, model) -> None:
     st.subheader("Data overview")
     overview_col1, overview_col2, overview_col3 = st.columns(3)
     overview_col1.metric("Rows", f"{len(cleaned_df):,}")
@@ -249,7 +215,7 @@ def render_dashboard(cleaned_df: pd.DataFrame, artifacts: dict) -> None:
     stat_col1.metric("Total transactions", f"{total_count:,}")
     stat_col2.metric("Legitimate", f"{legit_count:,}")
     stat_col3.metric("Fraudulent", f"{fraud_count:,}")
-    stat_col4.metric("Fraud rate", f"{fraud_rate * 100:.2f}%")
+    stat_col4.metric("Original Fraud rate", f"{fraud_rate * 100:.2f}%")
 
     balance_df = pd.DataFrame(
         {"Count": [legit_count, fraud_count]},
@@ -287,112 +253,34 @@ def render_dashboard(cleaned_df: pd.DataFrame, artifacts: dict) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Credit Card Fraud Detection", page_icon="💳", layout="wide")
+    
+    # Injection of Custom CSS themes
     st.markdown("""
     <style>
-
-    /* Main app */
-    .stApp {
-        background-color: #f5f7fb;
-    }
-
-    /* Header */
+    .stApp { background-color: #f5f7fb; }
     .main-header {
         background: linear-gradient(135deg, #1e3c72, #2a5298);
-        padding: 25px;
-        border-radius: 15px;
-        text-align: center;
-        color: white;
-        margin-bottom: 20px;
+        padding: 25px; border-radius: 15px; text-align: center; color: white; margin-bottom: 20px;
         box-shadow: 0px 4px 15px rgba(0,0,0,0.15);
     }
-
-    /* Section containers */
     .custom-box {
-        background: white;
-        padding: 20px;
-        border-radius: 12px;
-        border-left: 6px solid #2a5298;
-        box-shadow: 0px 3px 10px rgba(0,0,0,0.08);
-        margin-bottom: 15px;
+        background: white; padding: 20px; border-radius: 12px; border-left: 6px solid #2a5298;
+        box-shadow: 0px 3px 10px rgba(0,0,0,0.08); margin-bottom: 15px;
     }
-
-    /* Horizontal separator */
-    hr {
-        border: none;
-        height: 2px;
-        background: linear-gradient(to right,#2a5298,#00c6ff);
-        margin: 20px 0;
-    }
-
-    /* Metrics */
-    .metric-card {
-        background: white;
-        padding: 15px;
-        border-radius: 12px;
-        text-align: center;
-        box-shadow: 0px 3px 8px rgba(0,0,0,0.1);
-    }
-
-    /* Tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 12px;
-    }
-
-    .stTabs [data-baseweb="tab"] {
-        background-color: #eef2ff;
-        border-radius: 10px;
-        padding: 10px 20px;
-    }
-
-    .stTabs [aria-selected="true"] {
-        background-color: #2a5298 !important;
-        color: white !important;
-    }
-
-    /* Buttons */
+    hr { border: none; height: 2px; background: linear-gradient(to right,#2a5298,#00c6ff); margin: 20px 0; }
+    .stTabs [data-baseweb="tab-list"] { gap: 12px; }
+    .stTabs [data-baseweb="tab"] { background-color: #eef2ff; border-radius: 10px; padding: 10px 20px; }
+    .stTabs [aria-selected="true"] { background-color: #2a5298 !important; color: white !important; }
     .stButton > button {
-        background: linear-gradient(135deg,#2a5298,#00c6ff);
-        color: white;
-        border-radius: 10px;
-        border: none;
-        font-weight: bold;
-        padding: 0.5rem 1.5rem;
+        background: linear-gradient(135deg,#2a5298,#00c6ff); color: white; border-radius: 10px;
+        border: none; font-weight: bold; padding: 0.5rem 1.5rem;
     }
-
-    .stButton > button:hover {
-        transform: scale(1.02);
-        transition: 0.2s;
-    }
-
-    /* Success card */
-    .success-box {
-        background: #e8fff0;
-        border-left: 6px solid #00b894;
-        padding: 15px;
-        border-radius: 10px;
-        margin-top: 10px;
-    }
-
-    /* Fraud card */
-    .fraud-box {
-        background: #fff0f0;
-        border-left: 6px solid #ff4757;
-        padding: 15px;
-        border-radius: 10px;
-        margin-top: 10px;
-    }
-
-    /* Sidebar */
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg,#1e3c72,#2a5298);
-    }
-
-    section[data-testid="stSidebar"] * {
-        color: white;
-    }
-
+    .stButton > button:hover { transform: scale(1.02); transition: 0.2s; }
+    section[data-testid="stSidebar"] { background: linear-gradient(180deg,#1e3c72,#2a5298); }
+    section[data-testid="stSidebar"] * { color: white; }
     </style>
     """, unsafe_allow_html=True)
+    
     st.markdown("""
     <div class='main-header'>
         <h1>Credit Card Fraud Detection System</h1>
@@ -400,67 +288,48 @@ def main() -> None:
     </div>
     """, unsafe_allow_html=True)
 
+    # Initialize basic application states
     if "transaction_history" not in st.session_state:
         st.session_state.transaction_history = []
     if "decision_threshold" not in st.session_state:
         st.session_state.decision_threshold = 0.5
 
+    # --- Sidebar Configuration Selector Integration ---
+    st.sidebar.header("Model Settings")
+    balancing_method = st.sidebar.selectbox(
+        "Data Balancing Strategy",
+        options=["None", "class_weight", "SMOTE"],
+        index=1,  # Defualts to class_weight
+        help="Select how to manage dataset structural skewness during training."
+    )
+
     if DATA_PATH.exists():
-
         df = load_data()
-
         quality = assess_data_quality(df)
-
         cleaned_df, cleaning_steps = clean_data(df)
 
-        artifacts = train_model(cleaned_df)
-
+        # Triggers dynamic cache training when dropdown changes
+        artifacts = get_or_train_model(cleaned_df, balancing_method)
         model = artifacts["model"]
-
         metrics = artifacts["metrics"]
 
-        save_artifacts(
-            model=model,
-            artifacts=artifacts,
-            cleaned_df=cleaned_df,
-        )
+        save_artifacts(model=model, artifacts=artifacts, cleaned_df=cleaned_df)
 
     else:
-
         cached = load_artifacts()
-
         if cached is None:
-            st.error(
-                "Dataset missing and no saved model found. "
-                "Run once with creditcard_2023.csv present."
-            )
+            st.error("Dataset missing and no saved model found. Run once with creditcard_2023.csv present.")
             st.stop()
 
         model = cached["model"]
-
         metrics = cached["metrics"]
-
         cleaned_df = cached["cleaned_df"]
+        artifacts = {"y_test": cached["y_test"], "fraud_proba": cached["fraud_proba"]}
+        quality = {"missing_values": 0, "duplicate_rows": 0, "infinite_values": 0, "invalid_class_values": 0}
+        cleaning_steps = ["Loaded previously trained model configurations."]
 
-        artifacts = {
-            "y_test": cached["y_test"],
-            "fraud_proba": cached["fraud_proba"],
-        }
-
-        quality = {
-            "missing_values": 0,
-            "duplicate_rows": 0,
-            "infinite_values": 0,
-            "invalid_class_values": 0,
-        }
-
-        cleaning_steps = [
-            "Loaded previously trained model."
-        ]
-
-        df = cleaned_df
-
-    with st.expander("Data quality & model training", expanded=False):
+    # Display expanded data profiles and operational status metrics
+    with st.expander("Data quality & model training status", expanded=False):
         quality_col1, quality_col2, quality_col3, quality_col4 = st.columns(4)
         quality_col1.metric("Missing values", quality["missing_values"])
         quality_col2.metric("Duplicate rows", quality["duplicate_rows"])
@@ -470,15 +339,15 @@ def main() -> None:
         st.subheader("Cleaning summary")
         for step in cleaning_steps:
             st.write(f"- {step}")
-        if len(cleaned_df) != len(df):
-            st.info(f"Rows after cleaning: {len(cleaned_df):,} (removed {len(df) - len(cleaned_df):,}).")
+
+        st.write(f"Active balancing method strategy: **{balancing_method}**")
 
         metric_col1, metric_col2, metric_col3 = st.columns(3)
-        metric_col1.metric("Training rows", f"{metrics['train_rows']:,}")
-        metric_col2.metric("Test rows", f"{metrics['test_rows']:,}")
-        metric_col3.metric("F1 (fraud class)", f"{metrics['f1_fraud']:.3f}")
+        metric_col1.metric("Training set samples", f"{metrics['train_rows']:,}")
+        metric_col2.metric("Test set samples", f"{metrics['test_rows']:,}")
+        metric_col3.metric("Initial validation F1-Score", f"{metrics['f1_fraud']:.3f}")
 
-        with st.expander("Classification report (hold-out test set)"):
+        with st.expander("Base classification performance report"):
             st.text(metrics["report"])
 
     detector_tab, dashboard_tab = st.tabs(["Fraud Detector", "Dashboard"])

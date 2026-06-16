@@ -1,0 +1,48 @@
+# Custom rules for the Streamlit & Random Forest Fraud Detection Project
+
+## Project Overview
+This repository contains a Streamlit-based machine learning application for fraud detection.
+- **Model:** Random Forest Classifier trained on `creditcard_2023.csv`. The trained model is serialized and saved for inference.
+- **UI/App:** A Streamlit interface that visualizes data properties, handles manual/randomized test case generation, and features a live threshold-tuning slider that dynamically updates precision, recall, and classification results.
+
+---
+
+## Tech Stack & Core Libraries
+- **Language:** Python 3.10+
+- **Frontend/App Framework:** Streamlit
+- **Machine Learning:** Scikit-learn (RandomForestClassifier), Joblib or Pickle (for model serialization)
+- **Data Manipulation:** Pandas, NumPy
+- **Metrics/Evaluation:** Scikit-learn (precision_score, recall_score, confusion_matrix)
+
+---
+
+## Code Style & Architecture Guidelines
+
+### 1. Python & Machine Learning Code Style
+- Follow PEP 8 guidelines for readability.
+- **Model Efficiency:** Ensure the Random Forest model uses `n_jobs=-1` where applicable to utilize all available cores during training/inference.
+- **Data Leakage:** Ensure scaling or preprocessing parameters are saved during training and correctly applied to live test cases without re-fitting.
+- **Explicit Serialization:** Verify that paths for saving/loading the `.pkl` or `.joblib` model are robust and handle relative paths cleanly (using `pathlib.Path`).
+
+### 2. Streamlit Performance & State Management
+- **State Optimization:** Use `st.session_state` to store the trained model, dataset summaries, and the active test case to prevent the app from re-running heavy computations (like model reloading or dataset sampling) on every user interaction.
+- **Dynamic Threshold Tuning:** Ensure the threshold slider interaction updates metrics instantly. Predictions should be calculated dynamically based on predicted probabilities (`predict_proba()[:, 1]`) matching against the user-defined threshold, rather than re-running `predict()`.
+- **Caching:** Use `@st.cache_resource` for loading the machine learning model and `@st.cache_data` for reading/processing `creditcard_2023.csv`.
+
+### 3. UI/UX Rules
+- Structure the dashboard into clean logical sections using `st.title()`, `st.header()`, and columns (`st.columns()`).
+- Display live metrics (Precision, Recall, F1-score) side-by-side using `st.metric()` so users can easily see changes when adjusting the threshold slider.
+- Use explicit success/error themes (`st.success()`, `st.error()`, `st.warning()`) to display whether a checked transaction is flagged as "Fraudulent" or "Legitimate".
+
+---
+
+## Cursor AI Assistant Behavior
+
+### Coding Rules
+- **Do not** write boilerplate code that re-reads the CSV file or re-trains the model on every widget change. Always prioritize `st.session_state` or caching.
+- Write modular code. Keep model training/evaluation logic separated from the Streamlit UI presentation logic where possible.
+- Provide clean exception handling when loading files or running inferences to prevent raw tracebacks from rendering in the Streamlit UI.
+
+### Response Rules
+- When writing code snippets, include comments explaining where `st.session_state` is being initialized or altered.
+- Focus on performance; if a proposed solution could trigger unnecessary app reruns, flag it and suggest the Streamlit-native alternative.
