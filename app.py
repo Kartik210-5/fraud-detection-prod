@@ -6,12 +6,14 @@ import pandas as pd
 import streamlit as st
 from sklearn.metrics import precision_score, recall_score
 
-# Import refactored model configuration functions
-from model import train_configured_model, FEATURE_COLUMNS, TARGET_COLUMN
-
-DATA_PATH = Path(__file__).parent / "creditcard_2023.csv"
-MODEL_PATH = Path(__file__).parent / "fraud_model.pkl"
-ARTIFACTS_PATH = Path(__file__).parent / "fraud_artifacts.pkl"
+# Import from our multi-model backend
+from model import (
+    get_or_train_all_models, 
+    DATA_PATH, 
+    FEATURE_COLUMNS, 
+    TARGET_COLUMN,
+    TEMP_DATA_PATH
+)
 
 
 def load_data() -> pd.DataFrame:
@@ -19,40 +21,6 @@ def load_data() -> pd.DataFrame:
         st.error(f"Dataset not found at `{DATA_PATH}`. Place `creditcard_2023.csv` in the same folder as this app.")
         st.stop()
     return pd.read_csv(DATA_PATH)
-
-
-def save_artifacts(model, artifacts, cleaned_df):
-    joblib.dump(model, MODEL_PATH)
-
-    cached = {
-        "metrics": artifacts["metrics"],
-        "y_test": artifacts["y_test"],
-        "fraud_proba": artifacts["fraud_proba"],
-
-        # small sample only
-        "sample_df": cleaned_df[FEATURE_COLUMNS + [TARGET_COLUMN]].sample(
-            min(1000, len(cleaned_df)),
-            random_state=42
-        ),
-    }
-
-    joblib.dump(cached, ARTIFACTS_PATH)
-
-
-def load_artifacts():
-    if not MODEL_PATH.exists() or not ARTIFACTS_PATH.exists():
-        return None
-
-    model = joblib.load(MODEL_PATH)
-    cached = joblib.load(ARTIFACTS_PATH)
-
-    return {
-        "model": model,
-        "metrics": cached["metrics"],
-        "y_test": cached["y_test"],
-        "fraud_proba": cached["fraud_proba"],
-        "cleaned_df": cached["sample_df"],
-    }
 
 
 def assess_data_quality(df: pd.DataFrame) -> dict:
@@ -105,9 +73,10 @@ def clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     return cleaned.reset_index(drop=True), steps
 
 
-@st.cache_resource(show_spinner="Training pipeline model...")
-def get_or_train_model(df: pd.DataFrame, balancing_method: str) -> dict:
-    return train_configured_model(df, balancing_method)
+# Cache the full pipeline load/train routine to keep interface changes instant
+@st.cache_resource(show_spinner="Processing pipeline model matrices...")
+def load_or_train_pipeline(cleaned_df=None) -> dict:
+    return get_or_train_all_models(cleaned_df)
 
 
 def threshold_metrics(y_true: np.ndarray, fraud_proba: np.ndarray, threshold: float) -> dict[str, float]:
@@ -138,11 +107,15 @@ def render_prediction_form(reference_df: pd.DataFrame) -> pd.DataFrame:
     st.subheader("Enter transaction details")
 
     if st.button("Fill random values"):
-        sample = reference_df[FEATURE_COLUMNS].sample(1, random_state=None).iloc[0]
-        st.session_state["amount"] = float(sample["Amount"])
-        for i in range(1, 29):
-            st.session_state[f"v{i}"] = float(sample[f"V{i}"])
-        st.rerun()
+        # CRITICAL FIX: Check if reference data contains any rows to sample from
+        if reference_df.empty:
+            st.warning("⚠️ Cannot sample random values: App is running in offline cache mode with no underlying dataset loaded.")
+        else:
+            sample = reference_df[FEATURE_COLUMNS].sample(1, random_state=None).iloc[0]
+            st.session_state["amount"] = float(sample["Amount"])
+            for i in range(1, 29):
+                st.session_state[f"v{i}"] = float(sample[f"V{i}"])
+            st.rerun()
 
     amount_val = st.number_input("Amount", value=100.0, min_value=0.0, format="%.2f", key="amount")
 
@@ -260,34 +233,47 @@ def main() -> None:
     st.set_page_config(page_title="Credit Card Fraud Detection", page_icon="💳", layout="wide")
     st.markdown("""
     <style>
-    /* Main app */
+    /* Main app layout backgrounds */
     .stApp { background-color: #f5f7fb; }
-    /* Header */
+    
+    /* Header branding container layout styling */
     .main-header {
         background: linear-gradient(135deg, #1e3c72, #2a5298);
         padding: 25px; border-radius: 15px; text-align: center; color: white; margin-bottom: 20px;
         box-shadow: 0px 4px 15px rgba(0,0,0,0.15);
     }
-    /* Section containers */
+    
+    /* Box element structuring layout styling */
     .custom-box {
         background: white; padding: 20px; border-radius: 12px; border-left: 6px solid #2a5298;
         box-shadow: 0px 3px 10px rgba(0,0,0,0.08); margin-bottom: 15px;
     }
-    /* Horizontal separator */
     hr { border: none; height: 2px; background: linear-gradient(to right,#2a5298,#00c6ff); margin: 20px 0; }
-    /* Tabs */
+    
+    /* Document Tab Layout Controls */
     .stTabs [data-baseweb="tab-list"] { gap: 12px; }
     .stTabs [data-baseweb="tab"] { background-color: #eef2ff; border-radius: 10px; padding: 10px 20px; }
     .stTabs [aria-selected="true"] { background-color: #2a5298 !important; color: white !important; }
-    /* Buttons */
+    
+    /* Interactivity element layout styles */
     .stButton > button {
         background: linear-gradient(135deg,#2a5298,#00c6ff); color: white; border-radius: 10px;
         border: none; font-weight: bold; padding: 0.5rem 1.5rem;
     }
     .stButton > button:hover { transform: scale(1.02); transition: 0.2s; }
-    /* Sidebar styling */
-    # section[data-testid="stSidebar"] { background: linear-gradient(180deg,#1e3c72,#2a5298); }
-    # section[data-testid="stSidebar"] * { color: white; }
+    
+    /* --- OVERRIDE SIDEBAR STYLINGS TO FORCE BLACK TEXT HIGHLIGHTS --- */
+    section[data-testid="stSidebar"] { 
+        background: linear-gradient(180deg, #ffffff, #f1f5f9) !important;
+        border-right: 1px solid #cbd5e1;
+    }
+    section[data-testid="stSidebar"] * { 
+        color: #0f172a !important; 
+    }
+    section[data-testid="stSidebar"] label p, section[data-testid="stSidebar"] h2 {
+        color: #0f172a !important;
+        font-weight: bold !important;
+    }
     </style>
     """, unsafe_allow_html=True)
     
@@ -303,45 +289,49 @@ def main() -> None:
     if "decision_threshold" not in st.session_state:
         st.session_state.decision_threshold = 0.5
 
-    # --- Top Left Sidebar Input Component ---
+    # --- Sidebar Dropdown Controls Block ---
     st.sidebar.header("Model Settings")
     balancing_method = st.sidebar.selectbox(
-        "Select dataset balancing strategy for model training:",
-        options=["None", "Class Weight", "SMOTE"],
+        "Data Balancing Strategy",
+        options=["None", "class_weight", "SMOTE"],
         index=1,
+        help="Select how to manage dataset structural skewness during training."
     )
 
+    # --- PIPELINE RESILIENT MULTI-MODEL HANDLING BLOCK ---
     if DATA_PATH.exists():
         df = load_data()
         quality = assess_data_quality(df)
         cleaned_df, cleaning_steps = clean_data(df)
 
-        artifacts = get_or_train_model(cleaned_df, balancing_method)
-        model = artifacts["model"]
-        metrics = artifacts["metrics"]
-
-        save_artifacts(model=model, artifacts=artifacts, cleaned_df=cleaned_df)
-
-        # Pre-cache remaining models natively so comparison tab acts instantaneously
-        cw_art = get_or_train_model(cleaned_df, "class_weight")
-        smote_art = get_or_train_model(cleaned_df, "SMOTE")
-        none_art = get_or_train_model(cleaned_df, "None")
+        # Automatically processes models and exports temp.csv
+        pipeline_artifacts = load_or_train_pipeline(cleaned_df)
     else:
-        cached = load_artifacts()
-        if cached is None:
-            st.error("Dataset missing and no saved model found. Run once with creditcard_2023.csv present.")
+        # FALLBACK MODE: CSV is missing. Load saved models from pkl assets
+        try:
+            pipeline_artifacts = load_or_train_pipeline()
+        except FileNotFoundError:
+            st.error("Severe Exception: Absolute system assets missing. Place `creditcard_2023.csv` in repository root.")
             st.stop()
 
-        model = cached["model"]
-        metrics = cached["metrics"]
-        cleaned_df = cached["cleaned_df"]
-        artifacts = {"y_test": cached["y_test"], "fraud_proba": cached["fraud_proba"]}
         quality = {"missing_values": 0, "duplicate_rows": 0, "infinite_values": 0, "invalid_class_values": 0}
-        cleaning_steps = ["Loaded previously trained model configurations."]
-        cw_art, smote_art, none_art = None, None, None
+        cleaning_steps = ["Loaded pre-compiled strategy models from storage logs."]
+        
+        # FIX: Check if temp.csv exists to preserve the random layout generator feature
+        if TEMP_DATA_PATH.exists():
+            cleaned_df = pd.read_csv(TEMP_DATA_PATH)
+            cleaning_steps.append("Loaded fallback random testing instances from temp.csv.")
+        else:
+            cleaned_df = pd.DataFrame(columns=FEATURE_COLUMNS + [TARGET_COLUMN])
+            cleaning_steps.append("Warning: temp.csv missing. Random testing features are disabled.")
 
-    # Operational Diagnostic Collapse Container
-    with st.expander("Data quality & model training", expanded=False):
+    # Unpack properties dynamically based on active selection choice
+    artifacts = pipeline_artifacts[balancing_method]
+    model = artifacts["model"]
+    metrics = artifacts["metrics"]
+
+    # Diagnostic Dropdown Wrapper Element
+    with st.expander("Data quality & model training status logs", expanded=False):
         quality_col1, quality_col2, quality_col3, quality_col4 = st.columns(4)
         quality_col1.metric("Missing values", quality["missing_values"])
         quality_col2.metric("Duplicate rows", quality["duplicate_rows"])
@@ -360,7 +350,7 @@ def main() -> None:
         with st.expander("Classification report (hold-out test set)"):
             st.text(metrics["report"])
 
-    # Navbar structure updated to contain the requested "Compare Strategies" option
+    # --- TAB NAVIGATION MATRIX ---
     detector_tab, dashboard_tab, compare_tab = st.tabs(["Fraud Detector", "Dashboard", "Compare Strategies"])
 
     with detector_tab:
@@ -372,37 +362,32 @@ def main() -> None:
     with compare_tab:
         st.subheader("Balancing Strategy Performance Metrics Table")
         
-        if cw_art and smote_art and none_art:
-            # Build clean data structure out of dataframes
-            comp_df = pd.DataFrame({
-                "Strategy Method": ["None (Unbalanced)", "class_weight", "SMOTE Resampling"],
-                "Validation F1-Score": [
-                    none_art["metrics"]["f1_fraud"], 
-                    cw_art["metrics"]["f1_fraud"], 
-                    smote_art["metrics"]["f1_fraud"]
-                ],
-                "Training Matrix Sample Size": [
-                    none_art["metrics"]["train_rows"], 
-                    cw_art["metrics"]["train_rows"], 
-                    smote_art["metrics"]["train_rows"]
-                ]
-            })
-            
-            # Show Table Matrix
-            st.dataframe(comp_df, use_container_width=True, hide_index=True)
-            
-            # Show Bar Chart Visualization 
-            st.subheader("F1-Score Comparison Bar Chart")
-            chart_data = pd.DataFrame({
-                "F1-Score": [
-                    none_art["metrics"]["f1_fraud"], 
-                    cw_art["metrics"]["f1_fraud"], 
-                    smote_art["metrics"]["f1_fraud"]
-                ]
-            }, index=["None", "class_weight", "SMOTE"])
-            st.bar_chart(chart_data)
-        else:
-            st.info("Comparison visualization only active when initializing app with source dataset present.")
+        # Build evaluation matrix summary dynamically from runtime memory registers
+        comp_df = pd.DataFrame({
+            "Strategy Method": ["None (Unbalanced)", "class_weight", "SMOTE Resampling"],
+            "Validation F1-Score": [
+                f"{pipeline_artifacts['None']['metrics']['f1_fraud']:.4f}", 
+                f"{pipeline_artifacts['class_weight']['metrics']['f1_fraud']:.4f}", 
+                f"{pipeline_artifacts['SMOTE']['metrics']['f1_fraud']:.4f}"
+            ],
+            "Training Matrix Sample Size": [
+                f"{pipeline_artifacts['None']['metrics']['train_rows']:,}", 
+                f"{pipeline_artifacts['class_weight']['metrics']['train_rows']:,}", 
+                f"{pipeline_artifacts['SMOTE']['metrics']['train_rows']:,}"
+            ]
+        })
+        
+        st.dataframe(comp_df, use_container_width=True, hide_index=True)
+        
+        st.subheader("F1-Score Comparison Bar Chart")
+        chart_data = pd.DataFrame({
+            "F1-Score": [
+                pipeline_artifacts["None"]["metrics"]["f1_fraud"], 
+                pipeline_artifacts["class_weight"]["metrics"]["f1_fraud"], 
+                pipeline_artifacts["SMOTE"]["metrics"]["f1_fraud"]
+            ]
+        }, index=["None", "class_weight", "SMOTE"])
+        st.bar_chart(chart_data)
 
 
 if __name__ == "__main__":
