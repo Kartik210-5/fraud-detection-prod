@@ -231,11 +231,10 @@ def render_dashboard(cleaned_df: pd.DataFrame, artifacts: dict) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Credit Card Fraud Detection", page_icon="💳", layout="wide")
     st.markdown("""
     <style>
-    /* Main app layout backgrounds */
-    .stApp { background-color: #f5f7fb; }
+    /* Main app layout backgrounds for crisp Light Mode */
+    .stApp { background-color: #f5f7fb; color: #0f172a; }
     
     /* Header branding container layout styling */
     .main-header {
@@ -244,26 +243,26 @@ def main() -> None:
         box-shadow: 0px 4px 15px rgba(0,0,0,0.15);
     }
     
-    /* Box element structuring layout styling */
+    /* Elegant clean light-mode box card elements */
     .custom-box {
         background: white; padding: 20px; border-radius: 12px; border-left: 6px solid #2a5298;
-        box-shadow: 0px 3px 10px rgba(0,0,0,0.08); margin-bottom: 15px;
+        box-shadow: 0px 3px 10px rgba(0,0,0,0.08); margin-bottom: 15px; color: #0f172a;
     }
-    hr { border: none; height: 2px; background: linear-gradient(to right,#2a5298,#00c6ff); margin: 20px 0; }
+    hr { border: none; height: 2px; background: linear-gradient(to right, #2a5298, #00c6ff); margin: 20px 0; }
     
-    /* Document Tab Layout Controls */
+    /* Tab Controls matching Light Layout */
     .stTabs [data-baseweb="tab-list"] { gap: 12px; }
-    .stTabs [data-baseweb="tab"] { background-color: #eef2ff; border-radius: 10px; padding: 10px 20px; }
+    .stTabs [data-baseweb="tab"] { background-color: #eef2ff; border-radius: 10px; padding: 10px 20px; color: #475569 !important; }
     .stTabs [aria-selected="true"] { background-color: #2a5298 !important; color: white !important; }
     
-    /* Interactivity element layout styles */
+    /* Interactivity button layouts */
     .stButton > button {
-        background: linear-gradient(135deg,#2a5298,#00c6ff); color: white; border-radius: 10px;
+        background: linear-gradient(135deg, #2a5298, #00c6ff); color: white; border-radius: 10px;
         border: none; font-weight: bold; padding: 0.5rem 1.5rem;
     }
-    .stButton > button:hover { transform: scale(1.02); transition: 0.2s; }
+    .stButton > button:hover { transform: scale(1.02); transition: 0.2s; box-shadow: 0px 4px 10px rgba(0,198,255,0.3); }
     
-    /* --- OVERRIDE SIDEBAR STYLINGS TO FORCE BLACK TEXT HIGHLIGHTS --- */
+    /* --- SIDEBAR STYLINGS FOR HIGH-CONTRAST LIGHT MODE --- */
     section[data-testid="stSidebar"] { 
         background: linear-gradient(180deg, #ffffff, #f1f5f9) !important;
         border-right: 1px solid #cbd5e1;
@@ -275,10 +274,14 @@ def main() -> None:
         color: #0f172a !important;
         font-weight: bold !important;
     }
-    /* Ensures options inside the dropdown popup panels are clean and readable */
+    /* Ensures options inside dropdown panels look clean and legible */
     div[data-baseweb="popover"] * {
+        background-color: #ffffff !important;
         color: #0f172a !important;
     }
+
+    /* HARD LOCK: Hides settings header, footer, and the options menu entirely */
+    #MainMenu, header, footer {visibility: hidden;}
     </style>
     """, unsafe_allow_html=True)
     
