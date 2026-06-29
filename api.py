@@ -20,7 +20,7 @@ ml_models_registry = {}
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     print("⏳ Warming up local model binaries into RAM cache...")
-    from model import ALGORITHMS, STRATEGIES, get_model_path
+    from model_io import ALGORITHMS, STRATEGIES, get_model_path
     for algo in ALGORITHMS:
         ml_models_registry[algo] = {}
         for strategy in STRATEGIES:
