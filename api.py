@@ -30,7 +30,17 @@ async def lifespan(app: FastAPI):
     yield
     print("🛑 Draining memory caches and shutting down API routing...")
 
+
 app = FastAPI(title="Fraud Inference Engine", version="1.1.0", lifespan=lifespan)
+
+@app.get("/")
+def read_root():
+    return {
+        "message": "Credit Card Fraud Detection API is Live & Operational!",
+        "documentation": "/docs",
+        "health_check": "/health"
+    }
+
 
 @app.get("/health")
 def health_check():
