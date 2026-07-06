@@ -1,3 +1,4 @@
+# app.py
 from pathlib import Path
 import os
 import numpy as np
@@ -6,14 +7,18 @@ import streamlit as st
 import requests
 from supabase import create_client, Client
 
-API_URL = os.getenv("API_URL", "https://fraud-detection-prod-production.up.railway.app").rstrip("/")
+# Environment and Path Configurations
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 TEMP_DATA_PATH = Path("temp.csv")
 FEATURE_COLUMNS = [f"V{i}" for i in range(1, 29)] + ["Amount"]
 
 @st.cache_resource
 def get_supabase_client():
-    url = st.secrets.get("https://mqdbfqlhjddqqncyrwpy.supabase.co") or os.getenv("https://mqdbfqlhjddqqncyrwpy.supabase.co")
-    key = st.secrets.get("sb_publishable_vb9pr-pn42rp3UOhGtYRAQ_woFkX5dg") or os.getenv("sb_publishable_vb9pr-pn42rp3UOhGtYRAQ_woFkX5dg")
+    """
+    Initializes the Supabase client safely using Streamlit secrets.
+    """
+    url = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_KEY") or os.getenv("SUPABASE_KEY")
     if url and key:
         return create_client(url, key)
     return None
@@ -27,14 +32,40 @@ def get_api_leaderboard() -> list:
     except Exception:
         return []
 
+# =====================================================================
+# TOUCHDOWN 3: ENCRYPTED / SECURED INFERENCE COMMUNICATION CHANNEL
+# =====================================================================
 def get_api_prediction(features_dict: dict, algo: str, strategy: str, threshold: float) -> dict:
     try:
+        # Pull the secret verification token out of hidden storage layers securely
+        api_key = st.secrets.get("INFERENCE_API_KEY") or os.getenv("INFERENCE_API_KEY", "dev-secret-key-123")
+        
+        connection_headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": api_key  # Injects the key to pass Touchdown 1 & 2 blocks cleanly
+        }
+        
         params = {"algo": algo, "strategy": strategy, "threshold": threshold}
-        response = requests.post(f"{API_URL}/predict", json=features_dict, params=params, timeout=5)
+        
+        response = requests.post(
+            f"{API_URL}/predict", 
+            json=features_dict, 
+            headers=connection_headers, 
+            params=params, 
+            timeout=5
+        )
+        
         if response.status_code == 200:
             return response.json()
+        elif response.status_code == 429:
+            st.error("🚨 **Rate Limit Exceeded:** The system is throttling rapid processing streams. Stand by before retrying.")
+            return None
+        elif response.status_code == 401:
+            st.error("🚨 **Authentication Error:** The security header token supplied by your secrets container is invalid.")
+            return None
         return None
-    except Exception:
+    except Exception as e:
+        st.error(f"❌ Network request failure: {e}")
         return None
 
 def record_transaction(amount: float, fraud_proba: float, threshold: float, model_name: str) -> None:
@@ -122,9 +153,10 @@ def render_dashboard(cleaned_df: pd.DataFrame, current_metrics: dict) -> None:
     st.subheader("Decision threshold")
     st.slider("Fraud probability threshold", 0.0, 1.0, float(st.session_state.decision_threshold), 0.01, key="decision_threshold")
 
-# ==========================================
-# TOUCHDOWN 3: LIVE MONITOR TAB RENDER ENGINE
-# ==========================================
+
+# =====================================================================
+# TOUCHDOWN 3 (PREVIOUS): LIVE MONITOR TAB RENDER ENGINE
+# =====================================================================
 def render_live_monitor():
     st.markdown("""
     <div class='custom-box'>
@@ -135,17 +167,15 @@ def render_live_monitor():
     
     sb = get_supabase_client()
     if not sb:
-        st.warning("⚠️ Supabase credentials missing. Wire them to environment variables to activate live analysis.")
+        st.warning("⚠️ Supabase credentials missing. Wire them to your environment variables or secrets container to activate telemetry visualization.")
         return
 
-    # User-controlled data window slicing
     window_size = st.slider("Select telemetry window size (Last N requests)", min_value=10, max_value=500, value=100, step=10)
 
     if st.button("🔄 Refresh System Metrics", type="secondary"):
         st.rerun()
 
     try:
-        # Fetch operational data window directly from the indexed table
         res = sb.table("predictions").select("*").order("created_at", desc=True).limit(window_size).execute()
         records = res.data
     except Exception as e:
@@ -156,13 +186,11 @@ def render_live_monitor():
         df = pd.DataFrame(records)
         df["created_at"] = pd.to_datetime(df["created_at"])
         
-        # 1. Operational Telemetry Computations
         total_inferences = len(df)
         fraud_events = len(df[df["label"] == "Fraud"])
         fraud_rate = (fraud_events / total_inferences) * 100 if total_inferences > 0 else 0.0
         p95_latency = df["latency_ms"].quantile(0.95)
 
-        # Render Core KPI Metrics Block
         m_col1, m_col2, m_col3 = st.columns(3)
         m_col1.metric("Monitored Traffic Window", f"{total_inferences} calls")
         m_col2.metric("Detected Fraud Velocity", f"{fraud_rate:.2f}%")
@@ -170,23 +198,18 @@ def render_live_monitor():
 
         st.markdown("---")
         
-        # Chronological sort required for plotting timeseries trends cleanly
         df_chronological = df.sort_values("created_at")
 
-        # 2. Plot: Tail Latency Profile over Time
         st.write("#### ⚡ Real-Time Server Latency Profile (ms)")
         st.line_chart(df_chronological.set_index("created_at")["latency_ms"])
 
-        # 3. Plot: Fraud Volatility Rate Over Time Window
         st.write("#### 📊 Cumulative Fraud Velocity Trend (%)")
-        # Build rolling expanding fraud rate line to track live system variations smoothly
         df_chronological["is_fraud"] = (df_chronological["label"] == "Fraud").astype(int)
         df_chronological["rolling_fraud_rate"] = (df_chronological["is_fraud"].expanding().mean()) * 100
         st.line_chart(df_chronological.set_index("created_at")["rolling_fraud_rate"])
 
         st.markdown("---")
         
-        # 4. Live Audit Ledger
         st.write("#### 📋 Live Telemetry Audit Data Grid")
         st.dataframe(
             df[["created_at", "algo", "strategy", "amount", "fraud_probability", "label", "latency_ms"]].head(25),
@@ -196,7 +219,7 @@ def render_live_monitor():
     else:
         st.info("⚡ System database is initialized. Standing by for transaction execution data...")
 
-        
+
 def main() -> None:
     st.markdown("""
     <style>
@@ -219,7 +242,6 @@ def main() -> None:
 
     cleaned_df = pd.read_csv(TEMP_DATA_PATH) if TEMP_DATA_PATH.exists() else pd.DataFrame(columns=FEATURE_COLUMNS)
 
-    # Updated navigation structure to mount the third tab cleanly
     detector_tab, dashboard_tab, leaderboard_tab, monitor_tab = st.tabs(["Fraud Detector", "Dashboard", "Leaderboard", "📈 Live Monitor"])
 
     with detector_tab: render_detector(cleaned_df, model_architecture, balancing_method)
