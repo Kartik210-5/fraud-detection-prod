@@ -2,16 +2,19 @@
 import contextlib
 import json
 import logging
+import os
 import time
 import uuid
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Depends, status
+from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
 import joblib
 from pathlib import Path
 import pandas as pd
 
+
 # =====================================================================
-# TOUCHDOWN 1: STRUCTURED LOGGING & JSON FORMATTING CONFIGURATION
+# TOUCHDOWN 1 (PREVIOUS): STRUCTURED LOGGING CONFIGURATION
 # =====================================================================
 class JsonFormatter(logging.Formatter):
     """
@@ -23,7 +26,6 @@ class JsonFormatter(logging.Formatter):
             "timestamp": self.formatTime(record, self.datefmt),
             "level": record.levelname,
             "message": record.getMessage(),
-            # Fall back to "SYSTEM" if the log is emitted outside an HTTP request lifecycle
             "request_id": getattr(record, "request_id", "SYSTEM")
         }
         if record.exc_info:
@@ -37,6 +39,38 @@ handler.setFormatter(JsonFormatter())
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
+
+# =====================================================================
+# NEW TOUCHDOWN 1: API KEY SECURITY SCHEME & DEPENDENCY
+# =====================================================================
+API_KEY_NAME = "X-API-Key"
+# auto_error=False lets us raise clear, descriptive custom 401 exceptions explicitly
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+def verify_api_key(header_value: str = Depends(api_key_header)):
+    """
+    Dependency to validate incoming requests against a secure environment token.
+    Defaults to 'dev-secret-key-123' if no environment variable is set locally.
+    """
+    expected_key = os.getenv("INFERENCE_API_KEY", "dev-secret-key-123")
+    
+    if not header_value:
+        logger.warning("Access Denied: Request missing X-API-Key identification header.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing API Key validation header."
+        )
+        
+    if header_value != expected_key:
+        logger.warning("Access Denied: Unauthorized or mismatched key token supplied.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or unauthorized API key."
+        )
+        
+    return header_value
+
+
 class TransactionPayload(BaseModel):
     V1: float; V2: float; V3: float; V4: float; V5: float; V6: float; V7: float; V8: float; V9: float; V10: float
     V11: float; V12: float; V13: float; V14: float; V15: float; V16: float; V17: float; V18: float; V19: float; V20: float
@@ -45,7 +79,6 @@ class TransactionPayload(BaseModel):
 
 ml_models_registry = {}
 
-# Clean Lifespan context manager now using structured system logging
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("⏳ Warming up local model binaries into RAM cache...")
@@ -63,17 +96,15 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 Draining memory caches and shutting down API routing...")
 
 
-app = FastAPI(title="Fraud Inference Engine", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="Fraud Inference Engine", version="1.2.0", lifespan=lifespan)
+
 
 # =====================================================================
 # REQUEST LIFECYCLE MIDDLEWARE (CORRELATION ID ASSIGNMENT)
 # =====================================================================
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    # Check if upstream already passed a tracking ID; if not, spin up a new UUIDv4
     request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-    
-    # Cache the tracking ID inside the state context so downstream endpoint logic can read it
     request.state.request_id = request_id
     
     extra = {"request_id": request_id}
@@ -84,8 +115,6 @@ async def log_requests(request: Request, call_next):
     latency = (time.time() - start_time) * 1000
     
     logger.info(f"Completed request with status {response.status_code} in {latency:.2f}ms", extra=extra)
-    
-    # Return it to the client via response headers for quick end-to-end debugging trace loops
     response.headers["X-Request-ID"] = request_id
     return response
 
@@ -105,15 +134,17 @@ def health_check():
     return {"status": "Healthy", "models_cached_count": count}
 
 
-@app.post("/predict")
+# =====================================================================
+# SECURED INFERENCE ENDPOINT WITH SECURITY DEPENDENCY
+# =====================================================================
+@app.post("/predict", dependencies=[Depends(verify_api_key)])
 def predict_transaction(
     payload: TransactionPayload,
-    request: Request, # Explicitly pass the request object to parse state values
+    request: Request, 
     algo: str = Query("Random Forest"),
     strategy: str = Query("None"),
     threshold: float = Query(0.50, ge=0.0, le=1.0)
 ):
-    # Extract the dynamic tracking ID assigned by the HTTP middleware layer
     req_id = getattr(request.state, "request_id", "UNKNOWN")
     extra = {"request_id": req_id}
 
@@ -128,12 +159,11 @@ def predict_transaction(
     try:
         fraud_prob = float(model_obj.predict_proba(input_df)[0, 1])
     except Exception as e:
-        logger.error(f"Scoring engine encountered a execution critical crash: {str(e)}", extra=extra)
+        logger.error(f"Scoring engine encountered an execution critical crash: {str(e)}", extra=extra)
         raise HTTPException(status_code=500, detail=f"Scoring engine error: {str(e)}")
     
     prediction_label = "Fraud" if fraud_prob >= threshold else "Legit"
     
-    # Log the complete prediction results out securely in structured format
     logger.info(
         f"Inference complete | Model: {algo} ({strategy}) | Amount: {payload.Amount} | "
         f"Prob: {fraud_prob:.4f} | Label: {prediction_label}", 
