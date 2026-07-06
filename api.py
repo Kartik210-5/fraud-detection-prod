@@ -11,10 +11,12 @@ from pydantic import BaseModel
 import joblib
 from pathlib import Path
 import pandas as pd
-
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 # =====================================================================
-# TOUCHDOWN 1 (PREVIOUS): STRUCTURED LOGGING CONFIGURATION
+# TOUCHDOWN 1: STRUCTURED LOGGING CONFIGURATION
 # =====================================================================
 class JsonFormatter(logging.Formatter):
     """
@@ -41,10 +43,9 @@ logger.setLevel(logging.INFO)
 
 
 # =====================================================================
-# NEW TOUCHDOWN 1: API KEY SECURITY SCHEME & DEPENDENCY
+# TOUCHDOWN 1: API KEY SECURITY SCHEME & DEPENDENCY
 # =====================================================================
 API_KEY_NAME = "X-API-Key"
-# auto_error=False lets us raise clear, descriptive custom 401 exceptions explicitly
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
 def verify_api_key(header_value: str = Depends(api_key_header)):
@@ -71,6 +72,9 @@ def verify_api_key(header_value: str = Depends(api_key_header)):
     return header_value
 
 
+# =====================================================================
+# CORE APPLICATION STATE & SCHEMAS
+# =====================================================================
 class TransactionPayload(BaseModel):
     V1: float; V2: float; V3: float; V4: float; V5: float; V6: float; V7: float; V8: float; V9: float; V10: float
     V11: float; V12: float; V13: float; V14: float; V15: float; V16: float; V17: float; V18: float; V19: float; V20: float
@@ -96,7 +100,14 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 Draining memory caches and shutting down API routing...")
 
 
+# =====================================================================
+# TOUCHDOWN 2: RATE LIMITING CONFIGURATION
+# =====================================================================
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Fraud Inference Engine", version="1.2.0", lifespan=lifespan)
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 # =====================================================================
@@ -119,6 +130,9 @@ async def log_requests(request: Request, call_next):
     return response
 
 
+# =====================================================================
+# CORE API ROUTES
+# =====================================================================
 @app.get("/")
 def read_root():
     return {
@@ -135,9 +149,10 @@ def health_check():
 
 
 # =====================================================================
-# SECURED INFERENCE ENDPOINT WITH SECURITY DEPENDENCY
+# TOUCHDOWN 1 & 2: SECURED AND RATE-LIMITED INFERENCE ROUTE
 # =====================================================================
 @app.post("/predict", dependencies=[Depends(verify_api_key)])
+@limiter.limit("30/minute")
 def predict_transaction(
     payload: TransactionPayload,
     request: Request, 
