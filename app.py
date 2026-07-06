@@ -126,47 +126,77 @@ def render_dashboard(cleaned_df: pd.DataFrame, current_metrics: dict) -> None:
 # TOUCHDOWN 3: LIVE MONITOR TAB RENDER ENGINE
 # ==========================================
 def render_live_monitor():
-    st.subheader("🛡️ Live Production Telemetry")
+    st.markdown("""
+    <div class='custom-box'>
+    <h3>🛡️ Live Production Telemetry & System Infrastructure Logs</h3>
+    <p>Real-time analytics processing operational workloads and profiling inference delays.</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
     sb = get_supabase_client()
     if not sb:
-        st.warning("Supabase credentials missing. Wire them to secrets to active live analysis.")
+        st.warning("⚠️ Supabase credentials missing. Wire them to environment variables to activate live analysis.")
         return
 
-    if st.button("🔄 Refresh Metrics"):
+    # User-controlled data window slicing
+    window_size = st.slider("Select telemetry window size (Last N requests)", min_value=10, max_value=500, value=100, step=10)
+
+    if st.button("🔄 Refresh System Metrics", type="secondary"):
         st.rerun()
 
     try:
-        res = sb.table("predictions").select("*").order("created_at", desc=True).limit(100).execute()
+        # Fetch operational data window directly from the indexed table
+        res = sb.table("predictions").select("*").order("created_at", desc=True).limit(window_size).execute()
         records = res.data
     except Exception as e:
-        st.error(f"Error fetching live logs: {e}")
+        st.error(f"❌ Error communicating with database cluster telemetry layer: {e}")
         return
 
     if records:
         df = pd.DataFrame(records)
         df["created_at"] = pd.to_datetime(df["created_at"])
         
-        tot = len(df)
-        fr_c = len(df[df["label"] == "Fraud"])
-        fr_rate = (fr_c / tot) * 100 if tot > 0 else 0
-        p95_lat = df["latency_ms"].quantile(0.95)
+        # 1. Operational Telemetry Computations
+        total_inferences = len(df)
+        fraud_events = len(df[df["label"] == "Fraud"])
+        fraud_rate = (fraud_events / total_inferences) * 100 if total_inferences > 0 else 0.0
+        p95_latency = df["latency_ms"].quantile(0.95)
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Recent Transactions Monitored", f"{tot}")
-        m2.metric("Detected Live Fraud Rate", f"{fr_rate:.1f}%")
-        m3.metric("p95 System Latency", f"{p95_lat:.2f} ms")
+        # Render Core KPI Metrics Block
+        m_col1, m_col2, m_col3 = st.columns(3)
+        m_col1.metric("Monitored Traffic Window", f"{total_inferences} calls")
+        m_col2.metric("Detected Fraud Velocity", f"{fraud_rate:.2f}%")
+        m_col3.metric("Tail Latency (p95 Profile)", f"{p95_latency:.2f} ms")
 
         st.markdown("---")
-        df_sorted = df.sort_values("created_at")
         
-        st.write("**Real-time Server Inference Latency Profile (ms)**")
-        st.line_chart(df_sorted.set_index("created_at")["latency_ms"])
-        
-        st.write("**Live Audit Trail Database Ledger**")
-        st.dataframe(df[["created_at", "algo", "strategy", "amount", "fraud_probability", "label", "latency_ms"]].head(20), use_container_width=True, hide_index=True)
-    else:
-        st.info("Database initialized successfully. Standing by for transaction traffic...")
+        # Chronological sort required for plotting timeseries trends cleanly
+        df_chronological = df.sort_values("created_at")
 
+        # 2. Plot: Tail Latency Profile over Time
+        st.write("#### ⚡ Real-Time Server Latency Profile (ms)")
+        st.line_chart(df_chronological.set_index("created_at")["latency_ms"])
+
+        # 3. Plot: Fraud Volatility Rate Over Time Window
+        st.write("#### 📊 Cumulative Fraud Velocity Trend (%)")
+        # Build rolling expanding fraud rate line to track live system variations smoothly
+        df_chronological["is_fraud"] = (df_chronological["label"] == "Fraud").astype(int)
+        df_chronological["rolling_fraud_rate"] = (df_chronological["is_fraud"].expanding().mean()) * 100
+        st.line_chart(df_chronological.set_index("created_at")["rolling_fraud_rate"])
+
+        st.markdown("---")
+        
+        # 4. Live Audit Ledger
+        st.write("#### 📋 Live Telemetry Audit Data Grid")
+        st.dataframe(
+            df[["created_at", "algo", "strategy", "amount", "fraud_probability", "label", "latency_ms"]].head(25),
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("⚡ System database is initialized. Standing by for transaction execution data...")
+
+        
 def main() -> None:
     st.markdown("""
     <style>
