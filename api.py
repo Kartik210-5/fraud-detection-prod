@@ -5,7 +5,7 @@ import logging
 import os
 import time
 import uuid
-from fastapi import FastAPI, HTTPException, Query, Request, Depends, status
+from fastapi import FastAPI, HTTPException, Query, Request, Depends, status, BackgroundTasks
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
 import joblib
@@ -14,6 +14,7 @@ import pandas as pd
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from supabase import create_client, Client
 
 # =====================================================================
 # TOUCHDOWN 1: STRUCTURED LOGGING CONFIGURATION
@@ -73,6 +74,44 @@ def verify_api_key(header_value: str = Depends(api_key_header)):
 
 
 # =====================================================================
+# DATABASE MANAGEMENT ENGINE (RESTORED DATABASE CONNECTIVITY)
+# =====================================================================
+supabase_client: Client = None
+
+def init_supabase():
+    global supabase_client
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_KEY")
+    if url and key:
+        try:
+            supabase_client = create_client(url, key)
+            logger.info("📡 Successfully established a persistent channel to the Supabase Database.")
+        except Exception as e:
+            logger.error(f"⚠️ Initial connection to Supabase failed: {e}")
+    else:
+        logger.warning("⚠️ Database tracking disabled: SUPABASE_URL or SUPABASE_KEY missing from environment.")
+
+def persist_prediction_task(payload_data: dict, latency: float, prob: float, label: str, algo: str, strategy: str, threshold: float):
+    if not supabase_client:
+        return
+    try:
+        record = {
+            "algo": algo,
+            "strategy": strategy,
+            "amount": float(payload_data.get("Amount", 0.0)),
+            "fraud_probability": prob,
+            "label": label,
+            "latency_ms": latency,
+            "threshold": threshold  # Added this key to satisfy your Supabase schema!
+        }
+        supabase_client.table("predictions").insert(record).execute()
+        print("🚀 Successfully pushed row to Supabase!")
+    except Exception as e:
+        print(f"❌ DATABASE INSERTION EXCEPTION ERROR: {str(e)}")
+        logger.error(f"❌ Asynchronous Telemetry Write Failed: {e}")
+
+
+# =====================================================================
 # CORE APPLICATION STATE & SCHEMAS
 # =====================================================================
 class TransactionPayload(BaseModel):
@@ -86,6 +125,7 @@ ml_models_registry = {}
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("⏳ Warming up local model binaries into RAM cache...")
+    init_supabase()  # Initialize connection channel on app startup
     from model_io import ALGORITHMS, STRATEGIES, get_model_path
     for algo in ALGORITHMS:
         ml_models_registry[algo] = {}
@@ -156,10 +196,12 @@ def health_check():
 def predict_transaction(
     payload: TransactionPayload,
     request: Request, 
+    background_tasks: BackgroundTasks, # Injected back to handle async db ingestion threads
     algo: str = Query("Random Forest"),
     strategy: str = Query("None"),
     threshold: float = Query(0.50, ge=0.0, le=1.0)
 ):
+    start_process_time = time.time()
     req_id = getattr(request.state, "request_id", "UNKNOWN")
     extra = {"request_id": req_id}
 
@@ -179,10 +221,26 @@ def predict_transaction(
     
     prediction_label = "Fraud" if fraud_prob >= threshold else "Legit"
     
+    # Calculate real computational execution latency profile block
+    elapsed_latency_ms = (time.time() - start_process_time) * 1000
+    
     logger.info(
         f"Inference complete | Model: {algo} ({strategy}) | Amount: {payload.Amount} | "
         f"Prob: {fraud_prob:.4f} | Label: {prediction_label}", 
         extra=extra
+    )
+    
+    # DISPATCH PERSISTENCE LOG ASYNC TASK (Fills database row for Streamlit UI tracking)
+    # DISPATCH PERSISTENCE LOG ASYNC TASK
+    background_tasks.add_task(
+        persist_prediction_task,
+        payload_data=payload.model_dump(),
+        latency=elapsed_latency_ms,
+        prob=fraud_prob,
+        label=prediction_label,
+        algo=algo,
+        strategy=strategy,
+        threshold=threshold  # Injected right here
     )
     
     return {
