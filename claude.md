@@ -1,0 +1,6 @@
+- Run development server: uvicorn main:app --reload
+- Run tests: pytest
+- Use explicit type hints for all function arguments and return types.
+- Follow a modular FastAPI architecture (routers, services, models).
+- Every new API endpoint must have a corresponding test file in the `tests/` directory.
+- No PR can be merged without a local test suite pass.
