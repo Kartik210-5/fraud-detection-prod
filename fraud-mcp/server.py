@@ -2,11 +2,6 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("fraud-mcp-server")
 
-
-# -------------------------
-# Resources
-# -------------------------
-
 @mcp.resource("model://fraud-detection/card")
 def model_card() -> str:
     return """
@@ -25,11 +20,6 @@ def model_card() -> str:
 Recommendation:
 Trust Ensemble-XG most for standard retail transactions.
 """
-
-
-# -------------------------
-# Tools
-# -------------------------
 
 @mcp.tool()
 def score_transaction(
