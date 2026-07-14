@@ -1,0 +1,9 @@
+{
+  "deno.enable": true,
+  "deno.disablePaths": [
+    "node_modules"
+  ],
+  "deno.enablePaths": [
+    "supabase/functions"
+  ]
+}
