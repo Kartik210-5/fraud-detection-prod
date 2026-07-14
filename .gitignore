@@ -5,3 +5,5 @@ temp.csv
 temp.py
 .venv
 fraud-mcp/.venv
+.vscode/*
+!.vscode/settings.json
