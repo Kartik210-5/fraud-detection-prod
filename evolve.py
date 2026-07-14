@@ -1,10 +1,33 @@
+# # evolve.py
+# import os
+# import sys
+# import numpy as np
+# import pandas as pd
+# import joblib
+# from pathlib import Path
+# from scipy.stats import ks_2samp
+# from supabase import create_client, Client
+
+# # import modules from current project layout
+# from model_io import FEATURE_COLUMNS, TARGET_COLUMN, get_model_path
+# from model import train_single_pipeline
+
+# # Initialize Supabase using environment variables
+# SUPABASE_URL = os.getenv("SUPABASE_URL")
+# SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # Use service_role key in CI/CD pipeline to write decisions
+
 # evolve.py
 import os
-import sys
+sys = None # (Keep your existing imports)
+from pathlib import Path
+from dotenv import load_dotenv  # 👈 ADD THIS IMPORT
+
+# Load the .env file explicitly
+load_dotenv()  # 👈 ADD THIS LINE TO LOAD YOUR ENV VARIABLES
+
 import numpy as np
 import pandas as pd
 import joblib
-from pathlib import Path
 from scipy.stats import ks_2samp
 from supabase import create_client, Client
 
@@ -12,9 +35,9 @@ from supabase import create_client, Client
 from model_io import FEATURE_COLUMNS, TARGET_COLUMN, get_model_path
 from model import train_single_pipeline
 
-# Initialize Supabase using environment variables
+# These will now load perfectly!
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # Use service_role key in CI/CD pipeline to write decisions
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 def get_supabase_client() -> Client:
     if not SUPABASE_URL or not SUPABASE_KEY:
