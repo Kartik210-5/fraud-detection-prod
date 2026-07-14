@@ -4,3 +4,4 @@ temp.csv
 .env
 temp.py
 .venv
+fraud-mcp/.venv
