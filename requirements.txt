@@ -1,6 +1,3 @@
-# ==========================================
-# Machine Learning & Scientific Computing
-# ==========================================
 numpy
 pandas
 scipy
@@ -8,39 +5,16 @@ scikit-learn
 imbalanced-learn
 xgboost
 joblib
-
-# ==========================================
-# MLOps & Tracking
-# ==========================================
 mlflow
-
-# ==========================================
-# API Server (FastAPI)
-# ==========================================
 fastapi
 uvicorn
 pydantic
 slowapi
 python-dotenv
-
-# ==========================================
-# Database & Network Clients
-# ==========================================
 supabase
 requests
-
-# ==========================================
-# Dashboard UI (Streamlit)
-# ==========================================
 streamlit
-
-# ==========================================
-# Model Context Protocol (MCP) Server
-# ==========================================
 mcp[cli]
 fastmcp
-
-# ==========================================
-# Testing & Code Quality
-# ==========================================
 pytest
+evidently
