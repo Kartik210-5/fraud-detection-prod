@@ -1,163 +1,220 @@
 # evolve.py
 import os
 import sys
+import logging
+from pathlib import Path
+from dotenv import load_dotenv
+
+# =====================================================================
+# 1. ENVIRONMENT INITIALIZATION
+# =====================================================================
+# Explicitly load .env file from the root directory
+load_dotenv()
+
 import numpy as np
 import pandas as pd
 import joblib
-from pathlib import Path
 from scipy.stats import ks_2samp
 from supabase import create_client, Client
 
-# import modules from current project layout
+# Import modules from current project layout
 from model_io import FEATURE_COLUMNS, TARGET_COLUMN, get_model_path
 from model import train_single_pipeline
 
-# Initialize Supabase using environment variables
+# Setup basic logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("evolution_pipeline")
+
+# =====================================================================
+# 2. SUPABASE HANDSHAKE
+# =====================================================================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # Use service_role key in CI/CD pipeline to write decisions
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-def get_supabase_client() -> Client:
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        print("⚠️ Supabase URL or Key missing from environment.")
-        return None
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+if not SUPABASE_URL or not SUPABASE_KEY:
+    logger.error("❌ Pipeline terminated: SUPABASE_URL or SUPABASE_KEY missing from environment.")
+    sys.exit(1)
 
-def detect_drift(reference_df: pd.DataFrame, current_df: pd.DataFrame) -> tuple[float, bool]:
+try:
+    supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    logger.info("📡 Successfully established connection to Supabase database.")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize Supabase client: {e}")
+    sys.exit(1)
+
+# Paths
+TEMP_DATA_PATH = Path("temp.csv")
+
+
+# =====================================================================
+# 3. HELPER FUNCTIONS: DATA ALIGNMENT & CLEANING
+# =====================================================================
+def fetch_telemetry_data(limit: int = 1000) -> pd.DataFrame:
     """
-    Performs a Kolmogorov-Smirnov test on all feature distributions.
-    If > 30% of features drift significantly (p-value < 0.05), a drift breach is declared.
+    Fetches the latest prediction telemetry records from the Supabase predictions table.
     """
-    alpha = 0.05
-    drift_count = 0
-    cols_to_check = [col for col in FEATURE_COLUMNS if col in reference_df.columns and col in current_df.columns]
+    try:
+        res = supabase_client.table("predictions").select("*").order("created_at", desc=True).limit(limit).execute()
+        records = res.data
+        if not records:
+            logger.warning("⚠️ No telemetry records found in the database.")
+            return pd.DataFrame()
+        return pd.DataFrame(records)
+    except Exception as e:
+        logger.error(f"❌ Error fetching telemetry from Supabase: {e}")
+        return pd.DataFrame()
+
+
+def clean_and_align_telemetry(telemetry_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aligns production telemetry columns and types with the offline baseline requirements.
+    Translates database schema 'label' to dataset schema 'Class' and converts strings to 0/1.
+    """
+    if telemetry_df.empty:
+        return pd.DataFrame()
+
+    cleaned_df = pd.DataFrame()
+
+    # 1. Map/Align Features (Handles database lowercase and system casing)
+    for col in FEATURE_COLUMNS:
+        db_col_name = col.lower()  # e.g., 'amount', 'v1'
+        if db_col_name in telemetry_df.columns:
+            cleaned_df[col] = telemetry_df[db_col_name].astype(float)
+        elif col in telemetry_df.columns:
+            cleaned_df[col] = telemetry_df[col].astype(float)
+        else:
+            # Fallback for missing features to prevent NaN crashes
+            cleaned_df[col] = 0.0
+
+    # 2. Map Target Column: DB 'label' -> ML 'Class'
+    # DB has 'label' (e.g., "Fraud", "Legit") or 'label_val'
+    db_target = "label" if "label" in telemetry_df.columns else "label_val"
     
-    if not cols_to_check or len(current_df) < 5:
-        # Fallback if there is insufficient live telemetry to compute stats
-        return 0.0, False
+    if db_target in telemetry_df.columns:
+        # Convert "Fraud" / "Legit" string entries into 1 / 0 numerical values
+        cleaned_df[TARGET_COLUMN] = telemetry_df[db_target].map({
+            "Fraud": 1, 
+            "Legit": 0,
+            1: 1,
+            0: 0,
+            1.0: 1,
+            0.0: 0
+        })
+    else:
+        # If no target exists, default to NaN so it can be safely pruned
+        cleaned_df[TARGET_COLUMN] = np.nan
 
-    for col in cols_to_check:
-        stat, p_value = ks_2samp(reference_df[col].dropna(), current_df[col].dropna())
-        if p_value < alpha:
-            drift_count += 1
-            
-    drift_ratio = drift_count / len(cols_to_check)
-    return float(drift_ratio), drift_ratio >= 0.30
+    # 3. CRITICAL FIX: Drop any row that contains NaN in the target label column
+    initial_count = len(cleaned_df)
+    cleaned_df = cleaned_df.dropna(subset=[TARGET_COLUMN])
+    cleaned_df[TARGET_COLUMN] = cleaned_df[TARGET_COLUMN].astype(int)
+    
+    dropped_count = initial_count - len(cleaned_df)
+    if dropped_count > 0:
+        logger.info(f"🧹 Cleaned data: Dropped {dropped_count} rows containing NaN targets.")
 
+    return cleaned_df
+
+
+# =====================================================================
+# 4. EVOLVE LOOP EXECUTION ENGINE
+# =====================================================================
 def execute_evolution_loop():
-    print("🔄 Initializing Closed-Loop Evolution Pipeline...")
-    supabase = get_supabase_client()
-    if not supabase:
-        print("❌ Pipeline terminated: Supabase client not initialized.")
+    logger.info("🔄 Initializing Closed-Loop Evolution Pipeline...")
+
+    # 1. Fetch baseline data to serve as training and comparison baseline
+    if not TEMP_DATA_PATH.exists():
+        logger.error(f"❌ Base reference file {TEMP_DATA_PATH} not found. Cannot evaluate drift.")
         return
-
-    # 1. Fetch Reference Baseline
-    reference_path = Path("temp.csv")
-    if not reference_path.exists():
-        print(f"❌ Reference baseline data missing at {reference_path}")
-        return
-    reference_df = pd.read_csv(reference_path)
-
-    # 2. Fetch Live Telemetry Data
-    print("📡 Fetching production telemetry from Supabase...")
-    try:
-        res = supabase.table("predictions").select("*").order("created_at", desc=True).limit(500).execute()
-        live_records = res.data
-    except Exception as e:
-        print(f"❌ Failed to query production logs: {e}")
-        return
-
-    # Parse and rebuild features dataframe
-    if live_records:
-        live_df = pd.DataFrame(live_records)
-        # Standardize naming alignment (telemetry uses 'amount', baseline uses 'Amount')
-        if "amount" in live_df.columns:
-            live_df["Amount"] = live_df["amount"]
-        # Backfill any missing PCA columns to ensure we run a clean drift test
-        for col in FEATURE_COLUMNS:
-            if col not in live_df.columns:
-                live_df[col] = np.random.normal(0, 1, size=len(live_df))
-    else:
-        print("⚠️ No telemetry found. Generating synthetic drifted features to evaluate retraining...")
-        live_df = reference_df.copy()
-        for col in FEATURE_COLUMNS:
-            live_df[col] = live_df[col] + np.random.normal(1.2, 0.5, size=len(live_df))
-
-    # Evaluate Drift
-    drift_score, drift_detected = detect_drift(reference_df, live_df)
     
-    # Check for manual trigger override
-    if os.getenv("FORCE_DRIFT", "false").lower() == "true":
-        print("⚠️ FORCE_DRIFT is enabled. Forcing retraining pipeline...")
-        drift_score, drift_detected = 0.85, True
-
-    print(f"📊 Calculated Drift Score: {drift_score:.4f} (Detected: {drift_detected})")
-
-    if not drift_detected:
-        print("✅ Features remain stable. Retraining skipped.")
+    baseline_df = pd.read_csv(TEMP_DATA_PATH)
+    
+    # 2. Fetch live telemetry from Supabase
+    raw_telemetry = fetch_telemetry_data(limit=1000)
+    if raw_telemetry.empty:
+        logger.warning("⚠️ Telemetry pool is empty. Skipping evolution execution cycle.")
         return
 
-    # 3. Model Duel Retraining Phase
-    print("🚨 Drift breach confirmed. Constructing Challenger...")
+    # 3. Clean and parse telemetry dataset safely
+    telemetry_cleaned = clean_and_align_telemetry(raw_telemetry)
+    if telemetry_cleaned.empty or len(telemetry_cleaned) < 10:
+        logger.warning("⚠️ Insufficient labeled telemetry data (minimum 10 rows required). Skipped.")
+        return
+
+    # 4. Perform Kolmogorov-Smirnov (KS) Drift Analysis on Feature Distributions
+    drift_detected = False
+    drift_features = []
     
-    # Load Current Active Champion Model
-    champion_algo, champion_strategy = "Random Forest", "SMOTE"
-    champ_path = get_model_path(champion_algo, champion_strategy)
+    for col in FEATURE_COLUMNS:
+        # Compare baseline distribution vs latest telemetry distribution
+        stat, p_val = ks_2samp(baseline_df[col], telemetry_cleaned[col])
+        if p_val < 0.05:  # Statistically significant change in distribution
+            drift_detected = True
+            drift_features.append(col)
+
+    logger.info(f"📊 Drift detection complete. Features with distribution shifts: {drift_features}")
     
-    champion_f1 = 0.0
-    if champ_path.exists():
+    force_drift = os.getenv("FORCE_DRIFT", "false").lower() == "true"
+    if drift_detected or force_drift:
+        if force_drift:
+            logger.info("🚀 Force-Drift Override Triggered! Initiating challenger build...")
+        else:
+            logger.warning("🚨 Drift breach confirmed! Constructing Challenger Model...")
+
+        # 5. Combine baseline dataset and cleaned telemetry data
+        combined_df = pd.concat([baseline_df, telemetry_cleaned], ignore_index=True)
+        
+        # Ensure target column remains non-null in combined dataset
+        combined_df = combined_df.dropna(subset=[TARGET_COLUMN])
+
+        # Prepare matrices
+        X = combined_df[FEATURE_COLUMNS]
+        y = combined_df[TARGET_COLUMN]
+
+        # 6. Train the Challenger Model (XGBoost + SMOTE)
+        algo = "XGBoost"
+        strategy = "SMOTE"
+        logger.info(f"🏋️ Training Challenger: {algo} ({strategy})...")
+
+        # Create split
+        from sklearn.model_selection import train_test_split
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
         try:
-            champ_payload = joblib.load(champ_path)
-            champion_f1 = champ_payload.get("metrics", {}).get("f1_fraud", 0.82)
-        except Exception:
-            champion_f1 = 0.80  # Baseline fallback
-    
-    # Synthesize updated datasets (Baseline + Live features)
-    combined_df = pd.concat([reference_df, live_df], ignore_index=True)
-    if TARGET_COLUMN not in combined_df.columns:
-        combined_df[TARGET_COLUMN] = np.random.choice([0, 1], size=len(combined_df), p=[0.99, 0.01])
+            # Execute standard pipeline training 
+            challenger_model, challenger_metrics = train_single_pipeline(
+                X_train, X_test, y_train, y_test, algo, strategy
+            )
+            
+            # Save the challenger
+            model_out_path = get_model_path(algo, strategy)
+            joblib.dump({"model": challenger_model, "metrics": challenger_metrics}, model_out_path)
+            
+            logger.info(f"🏆 Challenger trained successfully! F1-Score: {challenger_metrics.get('f1_fraud', 0.0):.4f}")
+            
+            # 7. Write training execution metrics back to Supabase logs
+            try:
+                record = {
+                    "event_type": "model_evolution",
+                    "details": f"Challenger trained. Alg: {algo}, Strat: {strategy}, F1: {challenger_metrics.get('f1_fraud', 0.0):.4f}",
+                    "metadata": {
+                        "drifted_features": drift_features,
+                        "metrics": challenger_metrics,
+                        "samples_count": len(combined_df)
+                    }
+                }
+                # Optional logs table payload deployment
+                supabase_client.table("model_decisions").insert(record).execute()
+                logger.info("📝 Log metrics successfully pushed to Supabase model_decisions.")
+            except Exception as ex:
+                logger.warning(f"⚠️ Log transaction not saved to database: {ex}")
 
-    # Split dataset
-    from sklearn.model_selection import train_test_split
-    X_train, X_test, y_train, y_test = train_test_split(
-        combined_df[FEATURE_COLUMNS], combined_df[TARGET_COLUMN], test_size=0.3, random_state=42
-    )
-
-    # Train Challenger (using XGBoost + SMOTE as a powerful challenger setup)
-    challenger_algo, challenger_strategy = "XGBoost", "SMOTE"
-    print(f"🏋️ Training Challenger: {challenger_algo} ({challenger_strategy})...")
-    challenger_model, challenger_metrics = train_single_pipeline(
-        X_train, X_test, y_train, y_test, algo=challenger_algo, strategy=challenger_strategy
-    )
-    challenger_f1 = challenger_metrics.get("f1_fraud", 0.0)
-
-    # Compare and Gatekeep Promotion
-    promoted = challenger_f1 > champion_f1
-    print(f"⚔️ Duel Results: Champion F1 = {champion_f1:.4f} | Challenger F1 = {challenger_f1:.4f}")
-
-    if promoted:
-        print(f"🏆 Challenger outperforms Champion! Promoting {challenger_algo} to Production...")
-        # Overwrite the default active champion cache
-        joblib.dump({"model": challenger_model, "metrics": challenger_metrics}, champ_path)
+        except Exception as e:
+            logger.error(f"❌ Training of challenger pipeline failed: {e}")
+            raise e
     else:
-        print("🛡️ Champion retains crown. Challenger deployment rejected.")
+        logger.info("🟢 System status: Stable. Incoming transaction data distributions match baseline profiles.")
 
-    # 4. Log Decisions directly to Supabase
-    decision_record = {
-        "drift_score": float(drift_score),
-        "drift_detected": bool(drift_detected),
-        "champion_version": f"{champion_algo} ({champion_strategy})",
-        "challenger_version": f"{challenger_algo} ({challenger_strategy})",
-        "champion_f1": float(champion_f1),
-        "challenger_f1": float(challenger_f1),
-        "promoted": bool(promoted),
-        "metadata": {"execution_trigger": "GitHub Actions Nightly Loop"}
-    }
-
-    try:
-        supabase.table("model_decisions").insert(decision_record).execute()
-        print("💾 Retraining decision recorded in database logs!")
-    except Exception as e:
-        print(f"❌ Failed to persist evolution log entry: {e}")
 
 if __name__ == "__main__":
     execute_evolution_loop()
