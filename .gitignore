@@ -7,3 +7,5 @@ temp.py
 fraud-mcp/.venv
 .vscode/*
 !.vscode/settings.json
+supabase/.temp
+__pycache__
