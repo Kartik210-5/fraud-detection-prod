@@ -1,11 +1,13 @@
-import contextlib
-import json
-import logging
+# api.py
 import os
 import time
 import uuid
+import json
+import logging
+import contextlib
 from pathlib import Path
 import joblib
+import torch
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
@@ -16,38 +18,46 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from supabase import create_client, Client
+# pyrefly: ignore [missing-import]
+from sentence_transformers import SentenceTransformer
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 # =====================================================================
-# ENVIRONMENT INITIALIZATION
+# 1. ENVIRONMENT & HARDWARE INITIALIZATION
 # =====================================================================
-load_dotenv()  # Ensure this is at the very top of your imports
+load_dotenv()
 
+# Setup hardware device for local AI models
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+    device_label = "Apple Silicon GPU (MPS)"
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+    device_label = "NVIDIA GPU (CUDA)"
+else:
+    device = torch.device("cpu")
+    device_label = "CPU"
+
+# Avoid OpenMP warnings/crashes on macOS
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+# Supabase Credentials
 url = os.getenv("SUPABASE_URL")
 key = os.getenv("SUPABASE_KEY")
 
-print(f"DEBUG: SUPABASE_URL Loaded -> {url is not None}")
-print(f"DEBUG: SUPABASE_KEY Loaded -> {key is not None}")
-
-if not url or not key:
-    print("⚠️ WARNING: SUPABASE_URL or SUPABASE_KEY missing from environment variables!")
-
-# Initialize the global client container
 supabase_client: Client = None
 if url and key:
     try:
         supabase_client = create_client(url, key)
-        print("📡 Successfully established a persistent channel to the Supabase Database.")
     except Exception as e:
         print(f"⚠️ Initial connection to Supabase failed: {e}")
 
-
 # =====================================================================
-# STRUCTURED LOGGING CONFIGURATION
+# 2. STRUCTURED LOGGING CONFIGURATION
 # =====================================================================
 class JsonFormatter(logging.Formatter):
     """
-    Custom formatter to convert Python log records into structured, 
-    single-line JSON strings optimal for cloud log parsers like Railway.
+    Custom formatter converting log records into single-line JSON strings.
     """
     def format(self, record):
         log_record = {
@@ -66,18 +76,13 @@ handler.setFormatter(JsonFormatter())
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-
 # =====================================================================
-# API KEY SECURITY SCHEME & DEPENDENCY
+# 3. API KEY SECURITY SCHEME
 # =====================================================================
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
 def verify_api_key(header_value: str = Depends(api_key_header)):
-    """
-    Dependency to validate incoming requests against a secure environment token.
-    Defaults to 'dev-secret-key-123' if no environment variable is set locally.
-    """
     expected_key = os.getenv("INFERENCE_API_KEY", "dev-secret-key-123")
     
     if not header_value:
@@ -96,13 +101,28 @@ def verify_api_key(header_value: str = Depends(api_key_header)):
         
     return header_value
 
+# =====================================================================
+# 4. SCHEMAS & GLOBAL STATE
+# =====================================================================
+class TransactionPayload(BaseModel):
+    V1: float; V2: float; V3: float; V4: float; V5: float; V6: float; V7: float; V8: float; V9: float; V10: float
+    V11: float; V12: float; V13: float; V14: float; V15: float; V16: float; V17: float; V18: float; V19: float; V20: float
+    V21: float; V22: float; V23: float; V24: float; V25: float; V26: float; V27: float; V28: float
+    Amount: float
+
+class QuestionRequest(BaseModel):
+    question: str
+
+# Global registries for local inference models
+ml_models_registry = {}
+local_nlp_models = {}
 
 # =====================================================================
-# DATABASE MANAGEMENT ENGINE
+# 5. ASYNC BACKGROUND TASKS & LIFESPAN
 # =====================================================================
 def persist_prediction_task(payload_data: dict, latency: float, prob: float, label: str, algo: str, strategy: str, threshold: float):
     if supabase_client is None:
-        print("❌ DATABASE INSERTION ABORTED: Supabase client is not initialized.")
+        logger.error("❌ DATABASE INSERTION ABORTED: Supabase client is not initialized.")
         return
     try:
         record = {
@@ -115,26 +135,15 @@ def persist_prediction_task(payload_data: dict, latency: float, prob: float, lab
             "threshold": threshold
         }
         supabase_client.table("predictions").insert(record).execute()
-        print("🚀 Successfully pushed row to Supabase!")
+        logger.info("🚀 Successfully pushed telemetry row to Supabase!")
     except Exception as e:
-        print(f"❌ DATABASE INSERTION EXCEPTION ERROR: {str(e)}")
         logger.error(f"❌ Asynchronous Telemetry Write Failed: {e}")
 
 
-# =====================================================================
-# CORE APPLICATION STATE & SCHEMAS
-# =====================================================================
-class TransactionPayload(BaseModel):
-    V1: float; V2: float; V3: float; V4: float; V5: float; V6: float; V7: float; V8: float; V9: float; V10: float
-    V11: float; V12: float; V13: float; V14: float; V15: float; V16: float; V17: float; V18: float; V19: float; V20: float
-    V21: float; V22: float; V23: float; V24: float; V25: float; V26: float; V27: float; V28: float
-    Amount: float
-
-ml_models_registry = {}
-
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("⏳ Warming up local model binaries into RAM cache...")
+    # --- PHASE 1: Load Traditional Machine Learning Models ---
+    logger.info("⏳ Warming up local ML models into RAM cache...")
     from model_io import ALGORITHMS, STRATEGIES, get_model_path
     for algo in ALGORITHMS:
         ml_models_registry[algo] = {}
@@ -144,24 +153,52 @@ async def lifespan(app: FastAPI):
                 try:
                     ml_models_registry[algo][strategy] = joblib.load(path)
                 except Exception as e:
-                    logger.error(f"⚠️ Failed to load model file at {path}: {e}")
+                    logger.error(f"⚠️ Failed to load ML model file at {path}: {e}")
+
+    # --- PHASE 2: Load Sovereign NLP Models (For RAG) ---
+    logger.info(f"⏳ Booting Local RAG Models on device: {device_label}...")
+    try:
+        # Load embedding model
+        embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", device=device)
+        local_nlp_models["embeddings"] = embedding_model
+
+        # Load tokenizers & model instances cleanly
+        model_name = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        llm_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.float32
+        ).to(device)
+
+        # Register generator pipeline
+        local_nlp_models["generator"] = pipeline(
+            "text-generation", 
+            model=llm_model, 
+            tokenizer=tokenizer,
+            device=device
+        )
+        local_nlp_models["tokenizer"] = tokenizer
+        logger.info("🟢 Local RAG engine warmed up successfully.")
+    except Exception as e:
+        logger.error(f"🔴 Local RAG engine setup failed: {e}")
+
     yield
+    # --- PHASE 3: Shutdown ---
     logger.info("🛑 Draining memory caches and shutting down API routing...")
+    ml_models_registry.clear()
+    local_nlp_models.clear()
 
 
 # =====================================================================
-# INITIALIZE FASTAPI AND RATE LIMITING OVERLAYS
+# 6. FASTAPI SETUP & MIDDLEWARE
 # =====================================================================
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI(title="Fraud Inference Engine", version="1.2.0", lifespan=lifespan)
+app = FastAPI(title="Fraud Inference & Sovereign RAG Production Engine", version="1.3.0", lifespan=lifespan)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-
-# =====================================================================
-# REQUEST LIFECYCLE MIDDLEWARE (CORRELATION ID ASSIGNMENT)
-# =====================================================================
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
@@ -178,14 +215,13 @@ async def log_requests(request: Request, call_next):
     response.headers["X-Request-ID"] = request_id
     return response
 
-
 # =====================================================================
-# CORE API ROUTES
+# 7. ROUTING ENDPOINTS
 # =====================================================================
 @app.get("/")
 def read_root():
     return {
-        "message": "Credit Card Fraud Detection API is Live & Operational!",
+        "message": "Unified Fraud API & Sovereign RAG is Live & Operational!",
         "documentation": "/docs",
         "health_check": "/health"
     }
@@ -193,8 +229,14 @@ def read_root():
 
 @app.get("/health")
 def health_check():
-    count = sum(len(ml_models_registry[a]) for a in ml_models_registry)
-    return {"status": "Healthy", "models_cached_count": count}
+    ml_count = sum(len(ml_models_registry[a]) for a in ml_models_registry)
+    rag_warm = "generator" in local_nlp_models
+    return {
+        "status": "Healthy", 
+        "models_cached_count": ml_count,
+        "local_rag_active": rag_warm,
+        "hardware_accelerator": str(device).upper()
+    }
 
 
 @app.post("/predict", dependencies=[Depends(verify_api_key)])
@@ -268,3 +310,97 @@ def get_leaderboard_matrix():
                 "test_rows": metrics.get("test_rows", "N/A")
             })
     return sorted(leaderboard, key=lambda x: x.get("f1_score_fraud", 0.0), reverse=True)
+
+
+@app.post("/ask")
+async def ask_rag(payload: QuestionRequest, request: Request):
+    """
+    Sovereign RAG endpoint utilizing local MiniLM + SmolLM2 and pgvector match_chunks
+    """
+    req_id = getattr(request.state, "request_id", "UNKNOWN")
+    extra = {"request_id": req_id}
+    
+    question = payload.question
+    if not question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    # Validate model availability
+    if "embeddings" not in local_nlp_models or "generator" not in local_nlp_models:
+        raise HTTPException(
+            status_code=503, 
+            detail="Local RAG models are currently warm-booting or offline. Please try again in a moment."
+        )
+
+    try:
+        # Step A: Local embedding generation
+        query_vector = local_nlp_models["embeddings"].encode(question).tolist()
+
+        # Step B: Match chunks in Supabase
+        matched_res = supabase_client.rpc(
+            "match_chunks",
+            {
+                "query_embedding": query_vector,
+                "match_threshold": 0.1,  # Lower similarity threshold for compact models
+                "match_count": 3
+            }
+        ).execute()
+        
+        contexts = matched_res.data
+    except Exception as e:
+        logger.error(f"Error querying context: {e}", extra=extra)
+        raise HTTPException(status_code=500, detail="Database RAG search failure.")
+
+    if not contexts:
+        return {
+            "answer": "I found no documentation or matching log sections in our system database to answer this.",
+            "citations": []
+        }
+
+    # Step C: Context Construction
+    context_text = ""
+    citations = []
+    for idx, chunk in enumerate(contexts, 1):
+        source = chunk["source_file"] if not chunk["source_url"] else chunk["source_url"]
+        citations.append({
+            "id": idx,
+            "source": source,
+            "excerpt": chunk["content"][:150] + "..."
+        })
+        context_text += f"\n[Context {idx}]: {chunk['content']}\n"
+
+    # Step D: Render prompt template using SmolLM2 Chat markup
+    tokenizer = local_nlp_models["tokenizer"]
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an operations assistant. Use the context blocks to answer the user's question concisely. "
+                "Only output facts present in the context. Keep answers to under 3 paragraphs."
+            )
+        },
+        {
+            "role": "user",
+            "content": f"Context:\n{context_text}\n\nQuestion: {question}"
+        }
+    ]
+    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+    # Step E: Inference execution
+    try:
+        outputs = local_nlp_models["generator"](
+            prompt,
+            max_new_tokens=250,
+            temperature=0.3,
+            do_sample=True,
+            pad_token_id=tokenizer.eos_token_id
+        )
+        raw_text = outputs[0]["generated_text"]
+        answer = raw_text[len(prompt):].strip()
+    except Exception as e:
+        logger.error(f"Local LLM inference failure: {e}", extra=extra)
+        raise HTTPException(status_code=500, detail="Local LLM inference engine failure.")
+
+    return {
+        "answer": answer,
+        "citations": citations
+    }
