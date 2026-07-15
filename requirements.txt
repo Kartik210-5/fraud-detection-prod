@@ -18,3 +18,5 @@ mcp[cli]
 fastmcp
 pytest
 evidently
+firecrawl-py
+sentence-transformer
