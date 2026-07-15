@@ -1,29 +1,47 @@
-from pathlib import Path
+# app.py
 import os
+import json
+import requests
 import numpy as np
 import pandas as pd
+from pathlib import Path
 import streamlit as st
-import requests
-from supabase import create_client, Client
-import json
 import streamlit.components.v1 as components
+from supabase import create_client, Client
 
-# Environment and Path Configurations
+# =====================================================================
+# 1. HARDWARE & PATH CONFIGURATIONS
+# =====================================================================
 API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 TEMP_DATA_PATH = Path("temp.csv")
 FEATURE_COLUMNS = [f"V{i}" for i in range(1, 29)] + ["Amount"]
 REPORT_PATH = Path("data_drift_report.html")
 
+st.set_page_config(page_title="Fraud Control & Evolution Panel", layout="wide")
+
+# Apply custom clean styling matching original UI design
+st.markdown("""
+<style>
+.stApp { background-color: #f5f7fb; color: #0f172a; }
+.custom-box { background: white; padding: 20px; border-radius: 12px; border-left: 6px solid #2a5298; box-shadow: 0px 3px 10px rgba(0,0,0,0.08); margin-bottom: 15px; color: #0f172a; }
+.stButton > button { background: linear-gradient(135deg, #2a5298, #00c6ff); color: white; border-radius: 10px; border: none; font-weight: bold; }
+div[data-testid="stMarkdownContainer"] p { color: #0f172a; }
+</style>
+""", unsafe_allow_html=True)
+
+# Initialize Session States
+if "transaction_history" not in st.session_state: 
+    st.session_state.transaction_history = []
+if "decision_threshold" not in st.session_state: 
+    st.session_state.decision_threshold = 0.50
+
+# =====================================================================
+# 2. HELPER UTILITIES & API INTEGRATIONS
+# =====================================================================
 @st.cache_resource
 def get_supabase_client():
-    """
-    Initializes the Supabase client safely by forcing a local .env file read.
-    """
-    # pyrefly: ignore [missing-import]
+    """Initializes the Supabase client safely by forcing a local .env file read."""
     from dotenv import load_dotenv
-    import os
-    
-    # Explicitly point to the .env file in the current directory
     load_dotenv(override=True)
     
     url = os.getenv("SUPABASE_URL")
@@ -88,11 +106,12 @@ def record_transaction(amount: float, fraud_proba: float, threshold: float, mode
         "Prediction": prediction,
         "Confidence (%)": round(confidence * 100, 2),
     }
-    if "transaction_history" not in st.session_state:
-        st.session_state.transaction_history = []
     st.session_state.transaction_history.insert(0, entry)
     st.session_state.transaction_history = st.session_state.transaction_history[:10]
 
+# =====================================================================
+# 3. INTERFACE RENDERING LOGIC
+# =====================================================================
 def render_prediction_form(reference_df: pd.DataFrame) -> pd.DataFrame:
     st.subheader("Enter transaction details")
     if st.button("Fill random values"):
@@ -278,75 +297,107 @@ def render_model_health_panel():
     st.write("#### Live Snapshot View:")
     components.html(html_content, height=800, scrolling=True)
 
-def load_reference_data(file_path: Path) -> pd.DataFrame:
-    if file_path.exists():
-        try:
-            df = pd.read_csv(file_path)
-            existing_cols = [col for col in FEATURE_COLUMNS if col in df.columns]
-            return df[existing_cols]
-        except Exception as e:
-            st.error(f"❌ Failed to parse reference dataset file: {e}")
-            return pd.DataFrame()
-    return pd.DataFrame()
 
-def load_current_live_data(window_size: int = 500) -> pd.DataFrame:
-    sb = get_supabase_client()
-    if not sb:
-        return pd.DataFrame()
-    try:
-        res = sb.table("predictions").select("*").order("created_at", desc=True).limit(window_size).execute()
-        records = res.data
-        if not records:
-            return pd.DataFrame(columns=FEATURE_COLUMNS)
-        df = pd.DataFrame(records)
-        current_df = pd.DataFrame(0.0, index=np.arange(len(df)), columns=FEATURE_COLUMNS)
-        
-        if "amount" in df.columns:
-            current_df["Amount"] = df["amount"].astype(float)
-        elif "Amount" in df.columns:
-            current_df["Amount"] = df["Amount"].astype(float)
-            
-        return current_df
-    except Exception as e:
-        st.error(f"❌ Failed to extract live production dataset: {e}")
-        return pd.DataFrame()
-
+# =====================================================================
+# 4. MAIN ENGINE ORCHESTRATOR
+# =====================================================================
 def main() -> None:
-    st.markdown("""
-    <style>
-    .stApp { background-color: #f5f7fb; color: #0f172a; }
-    .custom-box { background: white; padding: 20px; border-radius: 12px; border-left: 6px solid #2a5298; box-shadow: 0px 3px 10px rgba(0,0,0,0.08); margin-bottom: 15px; color: #0f172a; }
-    .stButton > button { background: linear-gradient(135deg, #2a5298, #00c6ff); color: white; border-radius: 10px; border: none; font-weight: bold; }
-    div[data-testid="stMarkdownContainer"] p { color: #0f172a; }
-    </style>
-    """, unsafe_allow_html=True)
+    st.title("🛡️ Enterprise Fraud Ops Control Center")
+    st.write("Real-time telemetry, model drift metrics, and sovereign RAG operation diagnostics.")
 
-    if "transaction_history" not in st.session_state: st.session_state.transaction_history = []
-    if "decision_threshold" not in st.session_state: st.session_state.decision_threshold = 0.5
-
+    # Side-panel Model Settings Controls
     st.sidebar.header("Model Settings")
     balancing_method = st.sidebar.selectbox("Data Balancing Strategy", options=["None", "class_weight", "SMOTE"], index=2)
     model_architecture = st.sidebar.selectbox("Model Architecture", options=["Random Forest", "XGBoost"], index=0)
 
+    # Leaderboard & baseline datasets loaders
     leaderboard_data = get_api_leaderboard()
     current_metrics = next((item for item in leaderboard_data if item.get("algorithm") == model_architecture and item.get("strategy") == balancing_method), {})
-
     cleaned_df = pd.read_csv(TEMP_DATA_PATH) if TEMP_DATA_PATH.exists() else pd.DataFrame(columns=FEATURE_COLUMNS)
 
-    detector_tab, dashboard_tab, leaderboard_tab, monitor_tab, drift_tab = st.tabs([
-        "Fraud Detector", "Dashboard", "Leaderboard", "Live Monitor", "Data Stability Monitor"
+    # Clean 3-Tab Interface Construction
+    tab_telemetry, tab_drift, tab_rag = st.tabs([
+        "📊 Telemetry & Detection", 
+        "🚨 Drift & Evolution Analysis", 
+        "🧙‍♂️ Systems Assistant (RAG)"
     ])
 
-    with detector_tab: render_detector(cleaned_df, model_architecture, balancing_method)
-    with dashboard_tab: render_dashboard(cleaned_df, current_metrics)
-    with monitor_tab: render_live_monitor()
-    with leaderboard_tab:
-        if leaderboard_data:
-            st.dataframe(pd.DataFrame(leaderboard_data), use_container_width=True, hide_index=True)
-        else:
-            st.info("No active pipeline data found.")
-    with drift_tab:
-        render_model_health_panel()
+    # --- Tab 1: Telemetry & Core Detection Subsystem ---
+    with tab_telemetry:
+        st.header("Real-Time Telemetry Feed & Inference Engine")
+        
+        # Sub-splits for Dashboard Overview vs Live Scoring Form
+        col_dash, col_detector = st.columns([1, 1])
+        with col_dash:
+            render_dashboard(cleaned_df, current_metrics)
+        with col_detector:
+            render_detector(cleaned_df, model_architecture, balancing_method)
+            
+        st.divider()
+        render_live_monitor()
+
+    # --- Tab 2: Drift, Leaderboards & Evolution Pipelines ---
+    with tab_drift:
+        st.header("Drift Drift Assessment Engine")
+        
+        col_lead, col_drift_visual = st.columns([2, 3])
+        with col_lead:
+            st.subheader("🏆 Model Leaderboard Matrix")
+            if leaderboard_data:
+                st.dataframe(pd.DataFrame(leaderboard_data), use_container_width=True, hide_index=True)
+            else:
+                st.info("No active pipeline data found.")
+        with col_drift_visual:
+            render_model_health_panel()
+
+    # --- Tab 3: Sovereign Systems Operations Assistant (RAG) ---
+    with tab_rag:
+        st.header("🧙‍♂️ Sovereign Systems Operations Assistant")
+        st.write(
+            "Ask technical or operational questions about your system architecture, model specifications, "
+            "or retraining behavior. This answers engine queries Supabase `pgvector` and runs a local LLM "
+            "(`SmolLM2`) right on this machine."
+        )
+        
+        st.divider()
+        
+        # User Question Query Input
+        user_query = st.text_input(
+            "What would you like to ask the system operations records?",
+            value="What algorithm does our model use and how does it handle drift?"
+        )
+        
+        if st.button("Query Systems Assistant", type="primary"):
+            if not user_query.strip():
+                st.warning("Please write a question before executing search.")
+            else:
+                with st.spinner("Processing vector embeddings & running local model inference..."):
+                    try:
+                        response = requests.post(
+                            f"{API_URL}/ask",
+                            json={"question": user_query},
+                            timeout=60
+                        )
+                        
+                        if response.status_code == 200:
+                            data = response.json()
+                            
+                            st.subheader("📝 Answer")
+                            st.info(data.get("answer", "No answer compiled."))
+                            
+                            citations = data.get("citations", [])
+                            if citations:
+                                st.subheader("📚 Verified Citations & References")
+                                for cit in citations:
+                                    with st.expander(f"[{cit['id']}] Source: {cit['source']}"):
+                                        st.write(cit["excerpt"])
+                            else:
+                                st.caption("No static documentation citations were matched for this response.")
+                                
+                        else:
+                            st.error(f"API returned an error: {response.status_code} - {response.text}")
+                    except Exception as e:
+                        st.error(f"Could not connect to the API server: {e}")
 
 if __name__ == "__main__":
     main()
